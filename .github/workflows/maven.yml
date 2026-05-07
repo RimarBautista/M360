@@ -20,7 +20,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       # 1. This step clones your repository into the runner's workspace
-      - name: Checkout Code
+      - name: Checkout Repository
         uses: actions/checkout@v4
 
       # 2. Now other actions can find your pom.xml
@@ -32,4 +32,4 @@ jobs:
           cache: 'maven'
 
       - name: Build with Maven
-        run: mvn install
+        run: mvn clean install -U
