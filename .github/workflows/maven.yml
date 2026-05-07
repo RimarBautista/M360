@@ -19,17 +19,12 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      # 1. This step clones your repository into the runner's workspace
-      - name: Checkout Repository
-        uses: actions/checkout@v4
-
-      # 2. Now other actions can find your pom.xml
+      - name: Checkout code
+        uses: actions/checkout@v4  # Add this line
       - name: Set up JDK
         uses: actions/setup-java@v4
         with:
           java-version: '17'
-          distribution: 'temurin'
           cache: 'maven'
-
       - name: Build with Maven
-        run: mvn clean test --file POM.xml
+        run: mvn clean install
