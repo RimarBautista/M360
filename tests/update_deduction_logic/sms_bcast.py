@@ -1,0 +1,628 @@
+import csv
+import math
+import os
+import re
+import time
+from pathlib import Path
+import pytest
+from playwright.sync_api import sync_playwright, Page, Playwright, TimeoutError as PlaywrightTimeoutError
+
+# Project directory setup
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+CSV_PATH = PROJECT_ROOT / "data" / "recipients_standard_pin.csv"
+
+# Configuration URLs
+LOGIN_URL = "https://dashboard.m360.com.ph/login"
+API_URL = "https://api.m360.com.ph/v3/api/pin/send"
+
+# Configurable Accounts Dictionary
+ACCOUNTS = {
+    "standard": {
+        "USERNAME": "jgmy360plan50k",
+        "PASSWORD": "Em360@123!!",
+        "APP_KEY": "p47Q0IlCdxQyzERT",
+        "APP_SECRET": "GMS22AdjM8gpneMo3XjJ19yET7R6lLRA",
+    },
+    "unli": {
+        "USERNAME": "qam3customunli",
+        "PASSWORD": "gS0Fy65L",
+        "APP_KEY": "WFQIIX9cRp4Wm29O",
+        "APP_SECRET": "luE9lWjPSulaOUmzvhXhNPbP3qiQ5Cbf",
+    }
+}
+
+
+def get_account_config(plan_name: str = "") -> dict:
+    """Resolves account credentials based on ACCOUNT_TYPE environment variable or portal_plan_name."""
+    env_account = os.getenv("ACCOUNT_TYPE", "").strip().lower()
+    if env_account in ACCOUNTS:
+        return ACCOUNTS[env_account]
+
+    if "unli" in plan_name.lower():
+        return ACCOUNTS["unli"]
+
+    return ACCOUNTS["standard"]
+
+
+# Dynamic Rate Configurations
+RATE_CONFIG = {
+    "SMS_Globe_Regular": 0.10,
+    "SMS_Globe_Excess": 0.11,
+    "SMS_Globe_Premium_Regular": 0.70,
+    "SMS_Globe_Premium_Excess": 0.71,
+    "SMS_Smart_Regular": 0.20,
+    "SMS_Smart_Excess": 0.21,
+    "SMS_Smart_Premium_Regular": 0.80,
+    "SMS_Smart_Premium_Excess": 0.81,
+    "SMS_Dito_Regular": 0.40,
+    "SMS_Dito_Excess": 0.41,
+    "SMS_Dito_Premium_Regular": 0.90,
+    "SMS_Dito_Premium_Excess": 0.91,
+    "SMS_Spain_Regular": 11.00,
+    "SMS_Spain_Excess": 11.00,
+    "SMS_Spain_Premium_Regular": 11.00,
+    "SMS_Spain_Premium_Excess": 11.10,
+}
+
+
+def calculate_sms_parts(text: str) -> int:
+    """Calculates SMS message parts based on character length."""
+    length = len(text)
+    if length <= 160:
+        return 1
+    return math.ceil(length / 153)
+
+
+def get_sms_rate(telco: str, rate_type: str) -> float:
+    """Looks up configured SMS rate based on telco and calculated rate_type."""
+    formatted_telco = telco.strip().capitalize()
+    formatted_flag = rate_type.strip()
+
+    rate_key = f"SMS_{formatted_telco}_{formatted_flag}"
+    
+    if rate_key not in RATE_CONFIG and "Premium" in formatted_flag:
+        fallback_key = f"SMS_{formatted_telco}_Premium"
+        if fallback_key in RATE_CONFIG:
+            return RATE_CONFIG[fallback_key]
+
+    if rate_key not in RATE_CONFIG:
+        pytest.fail(f"Configured rate key '{rate_key}' was not found in RATE_CONFIG dictionary!")
+
+    return RATE_CONFIG[rate_key]
+
+
+def determine_rate_type(page: Page, plan_name: str, csv_sender_flag: str) -> str:
+    """Determines if deduction uses Regular, Excess, Premium_Regular, or Premium_Excess rate."""
+    page.goto("https://dashboard.m360.com.ph/plan-usage", wait_until="domcontentloaded")
+    
+    try:
+        page.wait_for_selector("[data-testid='total-usage'], [data-testid='total-excess-usage']", timeout=15000)
+    except PlaywrightTimeoutError:
+        page.wait_for_selector("text=Total Consumed", timeout=10000)
+
+    excess_banner = page.locator("div.pb-spiel, div:has-text('excess charges')")
+    has_excess_banner = excess_banner.count() > 0 and excess_banner.first.is_visible()
+
+    plan_block = page.locator(f"xpath=//*[contains(text(), '{plan_name}')]/ancestor::div[contains(@class, 'v-card') or contains(@class, 'card') or contains(@class, 'row') or contains(@class, 'container') or self::div][1]")
+    
+    if plan_block.count() and plan_block.first.is_visible():
+        consumables_label = plan_block.locator("xpath=.//*[text()='Consumables' or contains(text(), 'Consumables')]")
+    else:
+        consumables_label = page.locator("xpath=//*[text()='Consumables' or contains(text(), 'Consumables')]")
+
+    has_consumables = consumables_label.count() > 0 and consumables_label.first.is_visible()
+
+    is_premium = csv_sender_flag.lower() == "premium"
+
+    if not has_excess_banner and has_consumables:
+        res = "Premium_Regular" if is_premium else "Regular"
+        print(f"  📊 Rate Condition Match: {res} (Excess Banner: NO | Consumables Label: YES)")
+        return res
+
+    elif has_excess_banner and has_consumables:
+        res = "Premium_Excess" if is_premium else "Excess"
+        print(f"  📊 Rate Condition Match: {res} (Excess Banner: YES | Consumables Label: YES)")
+        return res
+
+    elif not has_excess_banner and not has_consumables:
+        res = "Premium_Excess" if is_premium else "Excess"
+        print(f"  📊 Rate Condition Match: {res} (Excess Banner: NO | Consumables Label: NO)")
+        return res
+
+    res = "Premium_Excess" if is_premium else "Excess"
+    print(f"  📊 Rate Condition Match: Fallback {res} (Excess Banner: {has_excess_banner} | Consumables Label: {has_consumables})")
+    return res
+
+
+def get_csv_rows() -> list[dict]:
+    """Reads recipient rows and mapped fields from data/recipients_standard_pin.csv."""
+    if not CSV_PATH.exists():
+        pytest.fail(f"Required CSV file was not found at expected path: {CSV_PATH.resolve()}")
+
+    rows_data = []
+    with open(CSV_PATH, mode="r", encoding="utf-8") as file:
+        reader = csv.DictReader(file)
+        for row in reader:
+            if row.get("to") and row["to"].strip():
+                is_intl_bool = row.get("is_intl", "true").strip().lower() in ("true", "1", "yes")
+                try:
+                    dcs_val = int(row.get("dcs", 0))
+                except ValueError:
+                    dcs_val = 0
+
+                rows_data.append({
+                    "to": row["to"].strip(),
+                    "sender_id": (row.get("sender_id") or row.get("from") or "qamoo10").strip(),
+                    "is_intl": is_intl_bool,
+                    "dcs": dcs_val,
+                    "text": row.get("content_text", "Hello from QA 1").strip(),
+                    "sender_id_flag": row.get("sender_id_flag", "regular").strip().lower(),
+                    "telco": row.get("telco", "globe").strip().lower(),
+                    "portal_plan_name": row.get("portal_plan_name", "M360 UNLI").strip(),
+                    "remarks": (row.get("remarks") or row.get("remark") or "").strip()
+                })
+
+    if not rows_data:
+        pytest.fail(f"No valid rows found in {CSV_PATH}")
+
+    run_row_env = os.getenv("RUN_ROW", "").strip().upper()
+    if run_row_env:
+        if run_row_env in ("LAST", "-1"):
+            return [rows_data[-1]]
+
+        selected_indices = [r.strip() for r in run_row_env.split(",") if r.strip().isdigit()]
+        if selected_indices:
+            filtered_rows = []
+            for idx_str in selected_indices:
+                row_idx = int(idx_str) - 1
+                if 0 <= row_idx < len(rows_data):
+                    filtered_rows.append(rows_data[row_idx])
+                else:
+                    print(f"⚠️ Warning: Row {idx_str} is out of range (1-{len(rows_data)}). Skipping.")
+            
+            if filtered_rows:
+                return filtered_rows
+            else:
+                pytest.fail(f"None of the specified rows in RUN_ROW='{run_row_env}' were within valid CSV range.")
+
+    return rows_data
+
+
+def get_dashboard_metrics(page: Page, target_delivered: int = 0) -> dict:
+    """Fetches 'Total Delivered Messages' from Dashboard, ensuring SPA network hydration finishes."""
+    page.goto("https://dashboard.m360.com.ph/dashboard", wait_until="domcontentloaded")
+    page.wait_for_timeout(1000)
+
+    if "/login" in page.url:
+        pytest.fail("❌ Redirected to /login while capturing dashboard metrics. Authentication session lost.")
+
+    try:
+        page.wait_for_selector("text=Total Delivered Messages", timeout=12000)
+    except PlaywrightTimeoutError:
+        try:
+            page.wait_for_selector("text=Delivered", timeout=5000)
+        except PlaywrightTimeoutError:
+            page.wait_for_timeout(2000)
+
+    # 1. Try testid locators
+    delivered_el = page.locator("[data-testid='total-delivered-messages'], [data-testid='delivered-messages']").first
+
+    # 2. Try clean relative XPath
+    if not delivered_el.count() or not delivered_el.is_visible():
+        delivered_el = page.locator("xpath=//*[contains(text(), 'Total Delivered')]/following-sibling::*[1]").first
+
+    # 3. Fallback: Filter container cards directly
+    if not delivered_el.count() or not delivered_el.is_visible():
+        card = page.locator("div.v-card, div.card, section, article").filter(has_text=re.compile(r"Total Delivered Messages|Delivered", re.I)).last
+        delivered_el = card.locator("span, p, h2, div").filter(has_text=re.compile(r"^\d[\d,]*$")).first
+
+    # SPA Hydration Guard: Poll until non-zero and matching target_delivered if provided
+    total_delivered = 0
+    for _ in range(6):
+        total_delivered_text = delivered_el.inner_text().strip() if (delivered_el.count() and delivered_el.is_visible()) else "0"
+        total_numbers = re.findall(r"\b\d+\b", total_delivered_text.replace(",", ""))
+        total_delivered = int(total_numbers[0]) if total_numbers else 0
+        if target_delivered > 0 and total_delivered >= target_delivered:
+            break
+        elif target_delivered == 0 and total_delivered > 0:
+            break
+        time.sleep(1)
+
+    return {
+        "total_delivered": total_delivered
+    }
+
+
+def get_plan_usage_metrics(page: Page, plan_name: str) -> dict:
+    """Fetches plan metrics including Consumed, Consumables, Message Transactions, and Excess."""
+    page.goto("https://dashboard.m360.com.ph/plan-usage", wait_until="domcontentloaded")
+    
+    try:
+        page.wait_for_selector("[data-testid='total-usage'], [data-testid='total-excess'], [data-testid='total-excess-usage']", timeout=15000)
+    except PlaywrightTimeoutError:
+        page.wait_for_selector("text=Total Consumed", timeout=10000)
+        
+    page.wait_for_timeout(2000)
+
+    plan_block = page.locator(f"xpath=//*[contains(text(), '{plan_name}')]/ancestor::div[contains(@class, 'v-card') or contains(@class, 'card') or contains(@class, 'row') or contains(@class, 'container') or self::div][1]")
+
+    def parse_numeric_element(locator_obj):
+        if locator_obj and locator_obj.count() and locator_obj.first.is_visible():
+            text_val = locator_obj.first.inner_text().strip()
+            match = re.search(r"\d+(?:\.\d+)?", text_val.replace(",", ""))
+            if match:
+                return float(match.group(0)), True
+        return 0.0, False
+
+    # 1. Total Consumed Amount
+    consumed_el = plan_block.locator("[data-testid='total-usage'], [data-testid='total-consumed']") if plan_block.count() else None
+    if not consumed_el or not consumed_el.count() or not consumed_el.first.is_visible():
+        consumed_el = page.locator("[data-testid='total-usage'], [data-testid='total-consumed']")
+    if not consumed_el or not consumed_el.count() or not consumed_el.first.is_visible():
+        consumed_el = page.locator("xpath=//*[contains(text(), 'Total Consumed') or contains(text(), 'Total Excess Usage')]/following-sibling::*")
+
+    consumed_amount, has_consumed = parse_numeric_element(consumed_el)
+
+    # 2. Consumables Limit
+    consumables_el = plan_block.locator("[data-testid='consumables']") if plan_block.count() else None
+    if not consumables_el or not consumables_el.count() or not consumables_el.first.is_visible():
+        consumables_el = page.locator("[data-testid='consumables']")
+
+    consumables_limit, has_consumables = parse_numeric_element(consumables_el)
+
+    # 3. Message Transactions Count (<span class="channels-amount">...</span>)
+    msg_trans_el = None
+    if plan_block.count() and plan_block.first.is_visible():
+        msg_trans_el = plan_block.locator("span.channels-amount:not([data-testid='total-usage']):not([data-testid='consumables']):not([data-testid='total-excess']):not([data-testid='total-excess-usage'])").first
+    if not msg_trans_el or not msg_trans_el.count() or not msg_trans_el.is_visible():
+        msg_trans_el = page.locator("span.channels-amount:not([data-testid='total-usage']):not([data-testid='consumables']):not([data-testid='total-excess']):not([data-testid='total-excess-usage'])").first
+
+    msg_transactions_val, _ = parse_numeric_element(msg_trans_el)
+    msg_transactions = int(msg_transactions_val)
+
+    # 4. Excess Count (<td data-testid="total-excess" class="channels-amount">...</td>)
+    excess_el = plan_block.locator("[data-testid='total-excess'], [data-testid='total-excess-usage']") if plan_block.count() else None
+    if not excess_el or not excess_el.count() or not excess_el.first.is_visible():
+        excess_el = page.locator("[data-testid='total-excess'], [data-testid='total-excess-usage']")
+
+    excess_count_val, _ = parse_numeric_element(excess_el)
+    excess_count = int(excess_count_val)
+
+    # 5. Limit Existence Check
+    limit_el = plan_block.locator("[data-testid='limit']") if plan_block.count() else None
+    if not limit_el or not limit_el.count() or not limit_el.first.is_visible():
+        limit_el = page.locator("xpath=//*[contains(text(), 'Limit') or contains(text(), 'Plan Limit')]")
+    has_limit = limit_el.count() > 0 and limit_el.first.is_visible()
+
+    return {
+        "consumed_amount": consumed_amount,
+        "consumables_limit": consumables_limit,
+        "msg_transactions": msg_transactions,
+        "excess_count": excess_count,
+        "has_consumed": has_consumed,
+        "has_consumables": has_consumables,
+        "has_limit": has_limit,
+    }
+
+
+def get_sms_report_metrics(page: Page) -> dict:
+    """Fetches Sent, Acknowledged, and Failed counts strictly using provided data-testid attributes."""
+    try:
+        with page.expect_response(
+            lambda response: "/reports" in response.url or "/sms" in response.url or response.status == 200,
+            timeout=10000
+        ):
+            page.goto("https://dashboard.m360.com.ph/reports/channel/sms", wait_until="domcontentloaded")
+    except PlaywrightTimeoutError:
+        page.goto("https://dashboard.m360.com.ph/reports/channel/sms", wait_until="domcontentloaded")
+    
+    try:
+        page.wait_for_selector("text=SMS Overview", timeout=15000)
+    except PlaywrightTimeoutError:
+        page.wait_for_timeout(2000)
+
+    page.wait_for_timeout(1000)
+
+    def parse_test_id_value(test_id: str) -> int:
+        el = page.locator(f"[data-testid='{test_id}']")
+        if el.count() and el.first.is_visible():
+            text_val = el.first.inner_text().strip()
+            clean_text = re.sub(r"\d+(?:\.\d+)?%", "", text_val)
+            numbers = re.findall(r"\b\d+\b", clean_text.replace(",", ""))
+            return int(numbers[0]) if numbers else 0
+        return 0
+
+    return {
+        "sent": parse_test_id_value("sms-sent-value"),
+        "acknowledged": parse_test_id_value("sms-delivered-value"),
+        "failed": parse_test_id_value("sms-failed-value")
+    }
+
+
+@pytest.mark.parametrize("row_data", get_csv_rows())
+def test_send_sms_journey_validation(row_data: dict):
+    account = get_account_config(row_data.get("portal_plan_name", ""))
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        context = browser.new_context()
+        page = context.new_page()
+
+        # -------------------------------------------------------------
+        # STEP 1: UI LOGIN (RESILIENT EMAIL/USERNAME SELECTORS)
+        # -------------------------------------------------------------
+        print(f"\n[STEP 1] Logging into m360 Portal ({account['USERNAME']})...")
+        
+        try:
+            page.goto(LOGIN_URL, timeout=15000, wait_until="domcontentloaded")
+        except PlaywrightTimeoutError:
+            print(f"  ⚠️ Initial navigation to {LOGIN_URL} timed out. Retrying...")
+
+        user_input = page.locator("input[type='email'], input[name='email'], input[data-cy='username'], input[placeholder*='Email' i]").first
+        pass_input = page.locator("input[type='password']").first
+        login_btn = page.locator("button:has-text('Log In'), button[type='submit']").first
+
+        login_loaded = False
+        login_retries = 3
+
+        while not login_loaded and login_retries > 0:
+            try:
+                user_input.wait_for(state="visible", timeout=3000)
+                login_loaded = True
+            except PlaywrightTimeoutError:
+                login_retries -= 1
+                if login_retries > 0:
+                    print(f"  ⚠️ Login form not rendered within 3s. Waiting 2s before refresh... (Retries left: {login_retries})")
+                    time.sleep(2)
+                    try:
+                        page.goto(LOGIN_URL, timeout=10000, wait_until="domcontentloaded")
+                    except PlaywrightTimeoutError:
+                        print("  ⚠️ Refresh attempt timed out. Continuing to next retry attempt...")
+
+        if not login_loaded:
+            print(f"\n❌ CRITICAL: Login page failed to render properly after 3 refresh retries.")
+            print(f"   URL: {LOGIN_URL}")
+            browser.close()
+            pytest.fail("❌ TERMINATING: Login page element failed to load after 3 refresh retries.")
+
+        user_input.fill(account["USERNAME"])
+        pass_input.fill(account["PASSWORD"])
+        login_btn.click()
+
+        try:
+            page.wait_for_url(lambda url: "/login" not in url, timeout=15000)
+            page.wait_for_load_state("domcontentloaded")
+        except PlaywrightTimeoutError:
+            print(f"❌ Login redirected back to login page. Check credentials for: {account['USERNAME']}")
+            browser.close()
+            pytest.fail(f"❌ Authentication Failed: Invalid credentials or session kickback for {account['USERNAME']}.")
+
+        # -------------------------------------------------------------
+        # STEP 2: CAPTURE PRE-DATA & DETERMINE DYNAMIC RATE TYPE
+        # -------------------------------------------------------------
+        print("\n[STEP 2] Capturing Pre-Data metrics across Portal...")
+        
+        for pre_attempt in range(3):
+            pre_dashboard = get_dashboard_metrics(page)
+            pre_plan = get_plan_usage_metrics(page, plan_name=row_data["portal_plan_name"])
+            pre_report = get_sms_report_metrics(page)
+
+            if pre_report["sent"] > 0 or pre_report["failed"] > 0 or pre_attempt == 2:
+                break
+            
+            print(f"  ⚠️ Pre-data SMS Report captured 0s (Attempt {pre_attempt + 1}/3). Reloading for SPA DOM hydration...")
+            time.sleep(2)
+
+        determined_rate_type = determine_rate_type(
+            page, 
+            plan_name=row_data["portal_plan_name"], 
+            csv_sender_flag=row_data["sender_id_flag"]
+        )
+
+        print(f"  -> Pre-Dashboard Total Delivered : {pre_dashboard['total_delivered']}")
+        print(f"  -> Pre-{row_data['portal_plan_name']} Total Consumed: ₱{pre_plan['consumed_amount']:.2f}")
+        print(f"  -> Pre-Consumables Limit          : ₱{pre_plan['consumables_limit']:.2f}")
+        print(f"  -> Pre-Message Transactions       : {pre_plan['msg_transactions']}")
+        print(f"  -> Pre-Excess Count               : {pre_plan['excess_count']}")
+        print(f"  -> Pre-SMS Report: Sent={pre_report['sent']} | Ack={pre_report['acknowledged']} | Failed={pre_report['failed']}")
+        print(f"  -> Determined Rate Type          : {determined_rate_type}")
+
+        # -------------------------------------------------------------
+        # STEP 3: EXECUTE API REQUEST (PIN API SEND)
+        # -------------------------------------------------------------
+        print(f"\n[STEP 3] Triggering PIN API POST payload to: {API_URL}")
+        print(f"  -> Recipient: {row_data['to']} (Sender ID: {row_data['sender_id']})...")
+        
+        api_context = p.request.new_context()
+
+        payload = {
+            "app_key": account["APP_KEY"],
+            "app_secret": account["APP_SECRET"],
+            "msisdn": row_data["to"],
+            "shortcode_mask": row_data["sender_id"],
+            "content": row_data["text"],
+            "dcs": row_data["dcs"],
+            "is_intl": row_data["is_intl"],
+            "minute_validity": 5,
+            "limit": 3
+        }
+
+        response = api_context.post(
+            API_URL,
+            data=payload,
+            headers={
+                "Content-Type": "application/json",
+                "Accept": "application/json"
+            }
+        )
+
+        try:
+            response_json = response.json()
+        except Exception:
+            response_json = {}
+
+        print(f"  -> API Response Code: {response.status}")
+        print(f"  -> Response Body     : {response_json}")
+
+        api_is_success = (response.status in (200, 201) and response_json.get("code") in (200, 201, None))
+
+        if api_is_success:
+            print("  ✨ PIN API Dispatch Successful!")
+        else:
+            print("  ❌ PIN API Dispatch Failed or returned an unexpected response structure.")
+
+        api_context.dispose()
+
+        # -------------------------------------------------------------
+        # STEP 4: CALCULATE EXPECTED METRIC INCREMENTS (HIERARCHY VALIDATION)
+        # -------------------------------------------------------------
+        char_count = len(row_data["text"])
+        parts_count = calculate_sms_parts(row_data["text"])
+        rate_per_part = get_sms_rate(row_data["telco"], determined_rate_type)
+
+        is_cashbus_sender = row_data["sender_id"].strip().lower() == "cashbus"
+
+        expected_msg_trans_add = 0
+        expected_excess_add = 0
+
+        # Priority 1: Cashbus Sender ID
+        if is_cashbus_sender:
+            print("  ❌ 1st PRIORITY MATCH: CASHBUS SENDER ID DETECTED.")
+            print("     -> Failed & Sent report metrics increment. Delivered & Consumed remain UNCHANGED.")
+            api_is_success = False
+            expected_parts_added = 0
+            added_cost = 0.0  # Consumed amount does NOT increment
+            expected_sent_add = parts_count
+            expected_ack_add = 0
+            expected_failed_add = parts_count
+
+        # Priority 2: Successful Transaction
+        elif api_is_success:
+            print("  ✅ 2nd PRIORITY MATCH: SUCCESSFUL TRANSACTION.")
+            print("     -> Delivered, Consumed, Sent, and Acknowledged metrics increment.")
+            expected_parts_added = parts_count
+            added_cost = round(parts_count * rate_per_part, 2)
+            expected_sent_add = parts_count
+            expected_ack_add = parts_count
+            expected_failed_add = 0
+
+            # Conditions 2, 3, & 4 for Plan Usage Metrics
+            has_consumed = pre_plan["has_consumed"]
+            has_consumables = pre_plan["has_consumables"]
+            has_limit = pre_plan["has_limit"]
+            total_consumed = pre_plan["consumed_amount"]
+            consumables = pre_plan["consumables_limit"]
+
+            if has_consumed and has_consumables and (total_consumed <= consumables) and has_limit:
+                expected_msg_trans_add = parts_count
+                expected_excess_add = 0
+            elif has_consumed and has_consumables and (total_consumed > consumables) and has_limit:
+                expected_msg_trans_add = parts_count
+                expected_excess_add = parts_count
+            elif not has_consumed and not has_consumables and has_limit:
+                expected_msg_trans_add = parts_count
+                expected_excess_add = 0
+            else:
+                expected_msg_trans_add = parts_count
+                expected_excess_add = 0
+
+        # Priority 3: Generic API Failures (e.g. Blocked SID)
+        else:
+            print("  ❌ 3rd PRIORITY MATCH: API TRANSACTION FAILED.")
+            print("     -> Failed & Sent report metrics increment. Delivered & Consumed remain UNCHANGED.")
+            expected_parts_added = 0
+            added_cost = 0.0
+            expected_sent_add = parts_count
+            expected_ack_add = 0
+            expected_failed_add = parts_count
+
+        expected_total_delivered = pre_dashboard["total_delivered"] + expected_parts_added
+
+        base_consumed = pre_plan["consumed_amount"]
+        if pre_plan["consumables_limit"] > 0 and base_consumed >= pre_plan["consumables_limit"]:
+            print(f"  🔄 Consumables limit of ₱{pre_plan['consumables_limit']:.2f} reached (Pre-Consumed: ₱{base_consumed:.2f}). Resetting base for post-data validation to ₱0.00.")
+            base_consumed = 0.0
+
+        expected_consumed_amount = round(base_consumed + added_cost, 2)
+        expected_msg_transactions = pre_plan["msg_transactions"] + expected_msg_trans_add
+        expected_excess_count = pre_plan["excess_count"] + expected_excess_add
+
+        expected_report_sent = pre_report["sent"] + expected_sent_add
+        expected_report_ack = pre_report["acknowledged"] + expected_ack_add
+        expected_report_failed = pre_report["failed"] + expected_failed_add
+
+        # -------------------------------------------------------------
+        # STEP 5: CAPTURE POST-DATA & VALIDATE (EXACT MATCH DISPATCH)
+        # -------------------------------------------------------------
+        print("\n[STEP 5] Fetching Post-Data with sync polling...")
+
+        def stats_match(dash: dict, plan: dict, rep: dict) -> bool:
+            return (
+                dash["total_delivered"] == expected_total_delivered and
+                round(plan["consumed_amount"], 2) == round(expected_consumed_amount, 2) and
+                plan["msg_transactions"] == expected_msg_transactions and
+                plan["excess_count"] == expected_excess_count and
+                rep["sent"] == expected_report_sent and
+                rep["acknowledged"] == expected_report_ack and
+                rep["failed"] == expected_report_failed
+            )
+
+        # Poll for all scenarios (both positive and negative/blocked SID)
+        retries = 8
+        while retries > 0:
+            print(f"  -> Stats polling cycle... Reloading pages (Retries left: {retries})")
+            
+            post_dashboard = get_dashboard_metrics(page, target_delivered=expected_total_delivered)
+            post_plan = get_plan_usage_metrics(page, plan_name=row_data["portal_plan_name"])
+            post_report = get_sms_report_metrics(page)
+
+            if stats_match(post_dashboard, post_plan, post_report):
+                print("  ✨ All expected portal metrics matched! Terminating retries immediately.")
+                break
+
+            print(f"     [Pending Sync] Delivered: {post_dashboard['total_delivered']}/{expected_total_delivered} | Consumed: ₱{post_plan['consumed_amount']:.2f}/₱{expected_consumed_amount:.2f} | Failed: {post_report['failed']}/{expected_report_failed}")
+            time.sleep(3)
+            retries -= 1
+
+        if not stats_match(post_dashboard, post_plan, post_report):
+            print("  ⚠️ Retry limit reached before all metrics synced.")
+
+        print("\n--- METRIC COMPARISON SUMMARY ---")
+        print(f"  Text Length              : {char_count} characters ({parts_count} part(s))")
+        print(f"  Is Cashbus Sender?       : {'YES' if is_cashbus_sender else 'NO'}")
+        print(f"  Transaction Status       : {'SUCCESS' if api_is_success else 'FAILED'}")
+        print(f"  Rate Applied             : {determined_rate_type} (₱{rate_per_part:.2f}/part)")
+        print(f"  Total Delivered Messages : Pre={pre_dashboard['total_delivered']} | Post={post_dashboard['total_delivered']} (Expected: {expected_total_delivered})")
+        print(f"  Total Consumed Amount    : Pre=₱{pre_plan['consumed_amount']:.2f} | Post=₱{post_plan['consumed_amount']:.2f} (Expected: ₱{expected_consumed_amount:.2f})")
+        print(f"  Message Transactions     : Pre={pre_plan['msg_transactions']} | Post={post_plan['msg_transactions']} (Expected: {expected_msg_transactions})")
+        print(f"  Excess Count             : Pre={pre_plan['excess_count']} | Post={post_plan['excess_count']} (Expected: {expected_excess_count})")
+        print(f"  SMS Report - Sent        : Pre={pre_report['sent']} | Post={post_report['sent']} (Expected: {expected_report_sent})")
+        print(f"  SMS Report - Acknowledged: Pre={pre_report['acknowledged']} | Post={post_report['acknowledged']} (Expected: {expected_report_ack})")
+        print(f"  SMS Report - Failed      : Pre={pre_report['failed']} | Post={post_report['failed']} (Expected: {expected_report_failed})")
+        print("---------------------------------\n")
+
+        # Strict Exact Assertions
+        assert post_dashboard["total_delivered"] == expected_total_delivered, \
+            f"Delivered Count Mismatch! Pre={pre_dashboard['total_delivered']}, Expected={expected_total_delivered}, Got={post_dashboard['total_delivered']}"
+
+        assert round(post_plan["consumed_amount"], 2) == round(expected_consumed_amount, 2), \
+            f"Consumed Amount Mismatch! Pre=₱{pre_plan['consumed_amount']:.2f}, Expected=₱{expected_consumed_amount:.2f}, Got=₱{post_plan['consumed_amount']:.2f}"
+
+        assert post_plan["msg_transactions"] == expected_msg_transactions, \
+            f"Message Transactions Mismatch! Pre={pre_plan['msg_transactions']}, Expected={expected_msg_transactions}, Got={post_plan['msg_transactions']}"
+
+        assert post_plan["excess_count"] == expected_excess_count, \
+            f"Excess Count Mismatch! Pre={pre_plan['excess_count']}, Expected={expected_excess_count}, Got={post_plan['excess_count']}"
+
+        assert post_report["sent"] == expected_report_sent, \
+            f"Report Sent Count Mismatch! Pre={pre_report['sent']}, Expected={expected_report_sent}, Got={post_report['sent']}"
+
+        assert post_report["acknowledged"] == expected_report_ack, \
+            f"Report Acknowledged Count Mismatch! Pre={pre_report['acknowledged']}, Expected={expected_report_ack}, Got={post_report['acknowledged']}"
+
+        assert post_report["failed"] == expected_report_failed, \
+            f"Report Failed Count Mismatch! Pre={pre_report['failed']}, Expected={expected_report_failed}, Got={post_report['failed']}"
+
+        print("✅ All Dashboard, Plan Usage, and SMS Report validations passed successfully!")
+
+        browser.close()

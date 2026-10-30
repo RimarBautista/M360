@@ -1,0 +1,28 @@
+class url_dashboard:
+
+    VIEW_SUBUSER_LIST = "https://stg-portal.m360.com.ph/sub-user"
+    ADD_SUBUSER = ""
+    EDIT_SUBUSER = ""
+    VIEW_SMS_SID = ""
+    VIEW_VIBER_SID = ""
+    VIEW_PHONE_NUMBER = ""
+    VIEW_ACCOUNT_ACTIVITY = ""
+    VIEW_SWITCH_ACCOUNTS_LIST = ""
+    VIEW_PLAN_USAGE = ""
+    CREATE_TEMPLATE = ""
+    EDIT_TEMPLATE = ""
+    ADD_NEW_CONTACT = ""
+    EDIT_CONTACT = ""
+    ADD_CONTACT_GROUP = ""
+    CREATE_BROADCAST_FORM = ""
+    EDIT_BROADCAST = ""
+    EDIT_DRAFT_BROADCAST = ""
+    EDIT_APPLICATION = ""
+    VIEW_API_WEBHOOK = ""
+    VIEW_EMAIL_DOMAIN_LIST = ""
+    VIEW_WABAID_LIST = ""
+    CREATE_FLOWS_FROM = ""
+    EDIT_DRAFT_FLOWS = ""
+
+
+

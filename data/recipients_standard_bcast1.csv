@@ -1,0 +1,6 @@
+to,group_option,tags_option,upload_csv_option,telco,is_optedout,sender_id,sender_id_flag,is_intl,dcs,portal_plan_name,remarks,content_text
+639171409235,,,,globe,no,qamoo10,regular,TRUE,0,"MY360 PLAN 50,000 TESTER",1 message part - positive scenario regulard sid,Hello from QA 1Hello from QA 1Hello from QA 1Hello from QA 1Hello from QA 1Hello from QA 1Hello from QA 1Hello from QA 1Hello from QA 1Hello hello test messa160
+,for automation 1,,,globe,no,qamoo10,regular,TRUE,0,"MY360 PLAN 50,000 TESTER",2 message parts - positive scenario regulard sid,Hello from QA 1Hello from QA 1Hello from QA 1Hello from QA 1Hello from QA 1Hello from QA 1Hello from QA 1Hello from QA 1Hello from QA 1Hello from QA 1Hello f160Hello from QA 1Hello from QA 1Hello from QA 1Hello from QA 1Hello from QA 1Hello from QA 1Hello from QA 1Hello from QA 1Hello from QA 1Hello fro307
+,,automation_tags_1,,globe,no,m360,premium,TRUE,0,"MY360 PLAN 50,000 TESTER",1 message part - positive scenario premium sid,Hello from QA 1Hello from QA 1Hello from QA 1Hello from QA 1Hello from QA 1Hello from QA 1Hello from QA 1Hello from QA 1Hello from QA 1Hello hello test messa160
+639171409235,,,,globe,no,qamoo10,regular,TRUE,,"MY360 PLAN 50,000 TESTER",,emoji characters - ✨🤣😭👌🏻🆎🍎DCS-8
+639171409235,,,,globe,no,qamoo10,regular,TRUE,,"MY360 PLAN 50,000 TESTER",,foreign characters - 龜契金羅书おぎดตถ@#
